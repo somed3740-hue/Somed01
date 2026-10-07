@@ -3,7 +3,7 @@ name: Build SOMED APK
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches: [main]
 
 jobs:
   build-apk:
@@ -11,56 +11,112 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Décompresser le projet
-        run: unzip -q SOMED_VTC_pret_pour_APK.zip -d app
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
+      - name: Trouver le projet
+        run: |
+          if [ -f SOMED_VTC_pret_pour_APK.zip ] && [ ! -d lib ]; then unzip -q SOMED_VTC_pret_pour_APK.zip -d _z; fi
+          if [ -d lib ]; then P=.; else P=$(dirname "$(find . -name pubspec.yaml -not -path './.git/*' | head -n1)"); fi
+          echo "PROJ=$P" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: "17"
 
-      - uses: android-actions/setup-android@v3
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
 
-      - name: Installer les dépendances
-        working-directory: app
-        run: npm install
-
-      - name: Compiler l'app web
-        working-directory: app
-        run: npm run build
-
-      - name: Créer le projet Android
-        working-directory: app
-        run: npx cap add android
-
-      - name: Icônes Android
-        working-directory: app
+      - name: GÃ©nÃ©rer le squelette Android
+        working-directory: ${{ env.PROJ }}
         run: |
-          npm install --no-save @capacitor/assets
-          npx capacitor-assets generate --android --iconBackgroundColor '#000000' --iconBackgroundColorDark '#000000'
+          mkdir /tmp/bak
+          cp -r lib assets pubspec.yaml /tmp/bak/
+          flutter create --org com.somed --project-name somed --platforms=android .
+          rm -rf lib assets pubspec.yaml test
+          cp -r /tmp/bak/lib /tmp/bak/assets /tmp/bak/pubspec.yaml .
 
-      - name: Permissions Android
-        working-directory: app
+      - name: RÃ©glages Android
+        working-directory: ${{ env.PROJ }}
+        env:
+          MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+          APP_DOMAIN: ${{ vars.APP_DOMAIN }}
         run: |
-          MANIFEST=android/app/src/main/AndroidManifest.xml
-          for P in ACCESS_FINE_LOCATION ACCESS_COARSE_LOCATION ACCESS_NETWORK_STATE POST_NOTIFICATIONS VIBRATE; do
-            grep -q "android.permission.$P" $MANIFEST || \
-              sed -i "s#</manifest>#    <uses-permission android:name=\"android.permission.$P\" />\n</manifest>#" $MANIFEST
-          done
+          cat > /tmp/patch.py <<'PYEOF'
+          import os, re, shutil, glob, sys
 
-      - name: Synchroniser Capacitor
-        working-directory: app
-        run: npx cap sync android
+          A = "android/app"
+          key = os.environ.get("MAPS_API_KEY") or "COLLEZ_VOTRE_CLE_ICI"
+          domain = os.environ.get("APP_DOMAIN") or "example.com"
+          if key == "COLLEZ_VOTRE_CLE_ICI":
+              print("ATTENTION : secret MAPS_API_KEY absent, la carte sera vide.")
 
-      - name: Construire l'APK
-        working-directory: app/android
-        run: ./gradlew assembleDebug
+          shutil.copytree("android_overlay/app/src/main/res", f"{A}/src/main/res", dirs_exist_ok=True)
+
+          p = f"{A}/src/main/AndroidManifest.xml"
+          m = open(p, encoding="utf-8").read()
+          perms = """<uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.VIBRATE"/>
+          """
+          m = m.replace("<application", perms + "    <application", 1)
+          m = re.sub(r"(<application[^>]*>)",
+                     r'\1\n        <meta-data android:name="com.google.android.geo.API_KEY" android:value="%s"/>' % key, m, 1)
+          filt = f"""
+                      <intent-filter android:autoVerify="true">
+                          <action android:name="android.intent.action.VIEW"/>
+                          <category android:name="android.intent.category.DEFAULT"/>
+                          <category android:name="android.intent.category.BROWSABLE"/>
+                          <data android:scheme="https" android:host="{domain}" android:pathPrefix="/d/"/>
+                      </intent-filter>
+                  </activity>"""
+          m = m.replace("</activity>", filt, 1)
+          queries = """    <queries>
+                  <intent><action android:name="android.intent.action.VIEW"/><data android:scheme="https"/></intent>
+                  <intent><action android:name="android.intent.action.DIAL"/><data android:scheme="tel"/></intent>
+              </queries>
+          """
+          m = re.sub(r"(</manifest>)", lambda x: queries + x.group(1), m) if "<queries>" not in m else m
+          open(p, "w", encoding="utf-8").write(m)
+
+          for g in glob.glob(f"{A}/build.gradle*"):
+              s = open(g, encoding="utf-8").read()
+              kts = g.endswith(".kts")
+              s = re.sub(r"minSdk(Version)?\s*=?\s*flutter\.minSdkVersion",
+                         "minSdk = 23" if kts else "minSdkVersion 23", s)
+              if kts:
+                  s = s.replace("compileOptions {", "compileOptions {\n        isCoreLibraryDesugaringEnabled = true", 1)
+                  s += '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n'
+              else:
+                  s = s.replace("compileOptions {", "compileOptions {\n        coreLibraryDesugaringEnabled true", 1)
+                  s += "\ndependencies {\n    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'\n}\n"
+              open(g, "w", encoding="utf-8").write(s)
+
+          for f in glob.glob(f"{A}/src/main/**/MainActivity.*", recursive=True):
+              s = open(f, encoding="utf-8").read()
+              s = s.replace("io.flutter.embedding.android.FlutterActivity", "io.flutter.embedding.android.FlutterFragmentActivity")
+              s = re.sub(r"\bFlutterActivity\b", "FlutterFragmentActivity", s)
+              open(f, "w", encoding="utf-8").write(s)
+
+          for f in glob.glob(f"{A}/src/main/res/values*/styles.xml"):
+              s = open(f, encoding="utf-8").read()
+              s = s.replace("@android:style/Theme.Light.NoTitleBar", "Theme.AppCompat.Light.NoActionBar")
+              s = s.replace("@android:style/Theme.Black.NoTitleBar", "Theme.AppCompat.NoActionBar")
+              open(f, "w", encoding="utf-8").write(s)
+          print("RÃ©glages Android appliquÃ©s.")
+          PYEOF
+          python3 /tmp/patch.py
+
+      - name: Compiler
+        working-directory: ${{ env.PROJ }}
+        run: |
+          flutter pub get
+          flutter build apk --release
 
       - uses: actions/upload-artifact@v4
         with:
           name: somed-apk
-          path: app/android/app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.PROJ }}/build/app/outputs/flutter-apk/app-release.apk
