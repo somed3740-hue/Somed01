@@ -103,6 +103,31 @@ jobs:
               else:
                   s = s.replace("compileOptions {", "compileOptions {\n        coreLibraryDesugaringEnabled true", 1)
                   s += "\ndependencies {\n    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'\n}\n"
+              s = re.sub(r"(\brelease\s*\{)",
+                         r"\1\n            isMinifyEnabled = false\n            isShrinkResources = false" if kts
+                         else r"\1\n            minifyEnabled false\n            shrinkResources false", s, 1)
+              open(g, "w", encoding="utf-8").write(s)
+
+          ROOT_KTS = """subprojects {
+              afterEvaluate {
+                  project.extensions.findByName("android")?.withGroovyBuilder {
+                      "compileSdkVersion"(36)
+                  }
+              }
+          }
+
+          """
+          ROOT_GROOVY = """subprojects {
+              afterEvaluate { p ->
+                  def a = p.extensions.findByName('android')
+                  if (a != null) { a.compileSdkVersion 36 }
+              }
+          }
+
+          """
+          for g in glob.glob("android/build.gradle*"):
+              s = open(g, encoding="utf-8").read()
+              s = (ROOT_KTS if g.endswith(".kts") else ROOT_GROOVY) + s
               open(g, "w", encoding="utf-8").write(s)
 
           for f in glob.glob(f"{A}/src/main/**/MainActivity.*", recursive=True):
