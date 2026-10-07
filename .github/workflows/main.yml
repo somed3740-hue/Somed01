@@ -13,8 +13,18 @@ jobs:
 
       - name: Trouver le projet
         run: |
-          if [ -f SOMED_VTC_pret_pour_APK.zip ] && [ ! -d lib ]; then unzip -q SOMED_VTC_pret_pour_APK.zip -d _z; fi
-          if [ -d lib ]; then P=.; else P=$(dirname "$(find . -name pubspec.yaml -not -path './.git/*' | head -n1)"); fi
+          if [ ! -f pubspec.yaml ]; then
+            Z=$(ls *.zip 2>/dev/null | head -n1 || true)
+            if [ -n "$Z" ]; then unzip -q "$Z" -d _z; fi
+          fi
+          F=$(find . -name pubspec.yaml -not -path './.git/*' | head -n1)
+          if [ -z "$F" ]; then
+            echo "ERREUR : projet introuvable. Envoyez le dossier du projet ou son .zip a la racine du depot."
+            ls -la
+            exit 1
+          fi
+          P=$(dirname "$F")
+          echo "Projet trouve dans : $P"
           echo "PROJ=$P" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
@@ -27,7 +37,7 @@ jobs:
           channel: stable
           cache: true
 
-      - name: GÃ©nÃ©rer le squelette Android
+      - name: Generer le squelette Android
         working-directory: ${{ env.PROJ }}
         run: |
           mkdir /tmp/bak
@@ -36,7 +46,7 @@ jobs:
           rm -rf lib assets pubspec.yaml test
           cp -r /tmp/bak/lib /tmp/bak/assets /tmp/bak/pubspec.yaml .
 
-      - name: RÃ©glages Android
+      - name: Reglages Android
         working-directory: ${{ env.PROJ }}
         env:
           MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
@@ -106,7 +116,7 @@ jobs:
               s = s.replace("@android:style/Theme.Light.NoTitleBar", "Theme.AppCompat.Light.NoActionBar")
               s = s.replace("@android:style/Theme.Black.NoTitleBar", "Theme.AppCompat.NoActionBar")
               open(f, "w", encoding="utf-8").write(s)
-          print("RÃ©glages Android appliquÃ©s.")
+          print("Reglages Android appliques.")
           PYEOF
           python3 /tmp/patch.py
 
